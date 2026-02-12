@@ -1,0 +1,10 @@
+opencv-python
+ultralytics
+easyocr
+pytesseract
+deep-sort-realtime
+pandas
+numpy
+matplotlib
+streamlit
+requests
