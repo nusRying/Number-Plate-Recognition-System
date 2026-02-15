@@ -1,0 +1,7 @@
+path: C:/Users/umair/Videos/Number Plate Recognition System/data/yolo_data # dataset root dir
+train: train/images
+val: val/images
+
+# Classes
+names:
+  0: License Plate

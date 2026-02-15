@@ -122,8 +122,18 @@ class ANPRSystem:
 
         return frame
 
-def main(source=0):
-    system = ANPRSystem(use_gpu=False)
+import argparse
+
+def main():
+    parser = argparse.ArgumentParser(description="ANPR System")
+    parser.add_argument("--source", type=str, default="0", help="Video source: '0' for webcam, or path to video file")
+    parser.add_argument("--gpu", action="store_true", help="Use GPU for inference")
+    args = parser.parse_args()
+
+    # Convert source to int if it's a digit (webcam index)
+    source = int(args.source) if args.source.isdigit() else args.source
+    
+    system = ANPRSystem(use_gpu=args.gpu, telegram_token=None, telegram_chat_id=None)
     
     # Start background processing thread
     thread = threading.Thread(target=system.process_frame_async, daemon=True)
@@ -131,10 +141,10 @@ def main(source=0):
 
     cap = cv2.VideoCapture(source)
     if not cap.isOpened():
-        logger.error("Could not open video source.")
+        logger.error(f"Could not open video source: {source}")
         return
 
-    logger.info("Starting processing loop. Press 'q' to quit.")
+    logger.info(f"Starting processing loop on source: {source}. Press 'q' to quit.")
     while True:
         ret, frame = cap.read()
         if not ret:
