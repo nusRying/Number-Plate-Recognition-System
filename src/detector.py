@@ -8,7 +8,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class ANPRDetector:
-    def __init__(self, vehicle_model: str = "yolov8n.pt", plate_model: str = "models/license_plate_detector.pt", conf_threshold: float = 0.5):
+    def __init__(self, vehicle_model: str = "yolov8n.pt", plate_model: str = "models/license_plate_detector.pt", conf_threshold: float = 0.3):
         """
         Initialize the ANPR Detector with YOLOv8 models.
         :param vehicle_model: Path/alias for vehicle detection model.

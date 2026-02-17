@@ -22,12 +22,12 @@ class ANPRSystem:
         self.ocr = PlateOCR(gpu=use_gpu)
         self.db = DatabaseManager()
         self.notifier = TelegramNotifier(token=telegram_token, chat_id=telegram_chat_id)
-        self.tracker = DeepSort(max_age=30, n_init=3)
+        self.tracker = DeepSort(max_age=30, n_init=1) # Reduced n_init to 1 for faster debugging
         
         # Advanced State Management
         self.processed_track_ids = set()
         self.voting_buffer = {} # {track_id: [list of ocr results]}
-        self.vote_threshold = 5 # Minimum frames to vote
+        self.vote_threshold = 3 # Reduced from 5 for better sensitivity
         self.blacklist = ["ABC-123", "XYZ-786"] # Dummy blacklist
 
         # Async Processing
@@ -45,8 +45,12 @@ class ANPRSystem:
             except queue.Empty:
                 continue
 
-            processed_frame = self.process_frame(frame, night_mode)
-            self.output_queue.put(processed_frame)
+            try:
+                processed_frame = self.process_frame(frame, night_mode)
+                self.output_queue.put(processed_frame)
+            except Exception as e:
+                logger.error(f"Error in processing thread: {e}", exc_info=True)
+                continue
 
     def process_frame(self, frame, night_mode=False):
         if night_mode:
@@ -55,6 +59,28 @@ class ANPRSystem:
         # 1. Detect Vehicles
         vehicles = self.detector.detect_vehicles(frame)
         
+        # Fallback: if no vehicles are found, try detecting plates on the whole frame
+        if not vehicles:
+            plates = self.detector.detect_plates(frame)
+            if plates:
+                logger.info(f"Direct plate detection! Found {len(plates)} plates.")
+                for p in plates:
+                    px1, py1, px2, py2 = p['bbox']
+                    # Add raw red box for debug visibility
+                    cv2.rectangle(frame, (px1, py1), (px2, py2), (0, 0, 255), 1)
+                    cv2.putText(frame, "RAW PLATE", (px1, py1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+                    
+                    # Also feed to tracker
+                    pad = 20
+                    bx1, by1 = max(0, px1-pad), max(0, py1-pad)
+                    bx2, by2 = min(frame.shape[1], px2+pad), min(frame.shape[0], py2+pad)
+                    vehicles.append({
+                        "bbox": [bx1, by1, bx2, by2],
+                        "score": p['score'],
+                        "class_id": 2, # car
+                        "label": "Direct-Plate"
+                    })
+
         detections_for_tracker = []
         for v in vehicles:
             x1, y1, x2, y2 = v['bbox']
@@ -73,7 +99,8 @@ class ANPRSystem:
             x1, y1, x2, y2 = map(int, ltrb)
 
             # Draw vehicle tracking info
-            frame = draw_info(frame, [x1, y1, x2, y2], f"ID:{track_id}", 1.0, color=(255, 0, 0))
+            label = f"ID:{track_id}" if "Plate" not in str(track.get_det_class()) else "Plate-Direct"
+            frame = draw_info(frame, [x1, y1, x2, y2], label, 1.0, color=(255, 0, 0))
 
             # 3. Plate Analysis
             h_f, w_f = frame.shape[:2]
@@ -96,12 +123,15 @@ class ANPRSystem:
                         
                         if plate_text and self.ocr.is_valid(plate_text):
                             # --- Advanced Step: Multi-frame Voting ---
-                            if track_id not in self.voting_buffer:
-                                self.voting_buffer[track_id] = []
-                            self.voting_buffer[track_id].append(plate_text)
+                        # --- Advanced Step: Multi-frame Voting ---
+                        if track_id not in self.voting_buffer:
+                            self.voting_buffer[track_id] = []
+                        self.voting_buffer[track_id].append(plate_text)
 
-                            # Determine final plate via majority vote after threshold
-                            if len(self.voting_buffer[track_id]) >= self.vote_threshold:
+                        # For Direct-Plates, show result immediately (threshold = 1)
+                        effective_threshold = 1 if "Direct" in label else self.vote_threshold
+                        
+                        if len(self.voting_buffer[track_id]) >= effective_threshold:
                                 most_common_plate, count = Counter(self.voting_buffer[track_id]).most_common(1)[0]
                                 
                                 # Visualize and Log once
@@ -119,6 +149,25 @@ class ANPRSystem:
                                         self.notifier.send_alert(most_common_plate, track_id)
                                     
                                     logger.info(f"Finalized Plate (Voted): {most_common_plate} (ID: {track_id})")
+                        else:
+                            logger.debug(f"Plate detected but failed validation: {plate_text} (ID: {track_id})")
+                else:
+                    logger.debug(f"No plates detected in cropped vehicle frame (ID: {track_id})")
+
+            # --- Visual Debug HUD: Overlay crop in top-right ---
+            if vehicle_crop.size > 0:
+                h_f, w_f = frame.shape[:2]
+                hud_size = 200
+                # Ensure HUD doesn't exceed frame size
+                hud_size = min(hud_size, h_f, w_f)
+                hud_crop = cv2.resize(vehicle_crop, (hud_size, hud_size))
+                frame[0:hud_size, w_f-hud_size:w_f] = hud_crop
+                cv2.rectangle(frame, (w_f-hud_size, 0), (w_f, hud_size), (0, 255, 0), 2)
+                
+                hud_label = "DETECTOR VIEW"
+                if "Direct" in label: hud_label = "DIRECT VIEW"
+                cv2.putText(frame, hud_label, (w_f-hud_size + 5, hud_size - 10), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
 
         return frame
 
@@ -145,14 +194,25 @@ def main():
         return
 
     logger.info(f"Starting processing loop on source: {source}. Press 'q' to quit.")
+    retry_count = 0
     while True:
         ret, frame = cap.read()
         if not ret:
+            if isinstance(source, int) and retry_count < 10:
+                retry_count += 1
+                logger.warning(f"Frame capture failed. Retry {retry_count}/10...")
+                time.sleep(0.1)
+                continue
+            logger.warning("Frame capture failed (ret=False). Exiting loop.")
             break
+        
+        retry_count = 0 # Reset on success
 
-        # Push to processing queue
-        if not system.frame_queue.full():
-            system.frame_queue.put((frame, False)) # False = night_mode off
+        # Push to processing queue (clear if full to prevent lag)
+        if system.frame_queue.full():
+            try: system.frame_queue.get_nowait()
+            except: pass
+        system.frame_queue.put((frame, False))
 
         # Get processed frame if available
         try:
